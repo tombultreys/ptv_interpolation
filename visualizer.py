@@ -4,7 +4,7 @@ from matplotlib.widgets import Slider, RadioButtons, CheckButtons
 
 class SliceViewer:
 
-    def __init__(self, u, v, w, x, y, z, mask=None, input_df=None):
+    def __init__(self, u, v, w, x, y, z, mask=None, input_df=None, fig=None):
         """
         u, v, w: 3D velocity components (nz, ny, nx). 
                  Can be tuples/lists (cleaned, initial) if both are provided.
@@ -37,9 +37,12 @@ class SliceViewer:
         valid_speeds = all_speeds[~np.isnan(all_speeds)]
         self.global_max_speed = np.max(valid_speeds) if valid_speeds.size > 0 else 1.0
         if self.global_max_speed > 1e10: self.global_max_speed = 100.0
+        if self.global_max_speed <= 0: self.global_max_speed = 1.0
         
         self.vmin = 0.0
         self.vmax = self.global_max_speed
+        if self.vmin >= self.vmax:
+             self.vmax = self.vmin + 1e-4
         
         # Pre-calculate 3D speed for the background
         self.speed = np.sqrt(self.u**2 + self.v**2 + self.w**2)
@@ -50,7 +53,17 @@ class SliceViewer:
         self.show_input_vectors = True
         self.show_mask = True
         
-        self.fig, self.ax = plt.subplots(figsize=(13, 8))
+        if fig is None:
+            self.fig, self.ax = plt.subplots(figsize=(13, 8))
+            self._is_custom_fig = False
+        else:
+            self.fig = fig
+            self._is_custom_fig = True
+            if len(fig.axes) > 0:
+                self.ax = fig.axes[0]
+            else:
+                self.ax = fig.add_subplot(111)
+                
         plt.subplots_adjust(bottom=0.2, left=0.25, right=0.9)
         
         # Colorbar axis
@@ -72,17 +85,21 @@ class SliceViewer:
         # Vector Scale Slider
         ax_vscale = plt.axes([0.35, 0.08, 0.55, 0.025], facecolor='lightcyan')
         self.slider_vscale = Slider(
-            ax_vscale, 'Vector Scale', 0.1, 10.0, valinit=self.v_scale
+            ax_vscale, 'Vector Scale', 0.1, 15.0, valinit=self.v_scale
         )
         self.slider_vscale.on_changed(self.on_vscale_change)
 
         # Color Range Sliders
+        vmax_init = min(4.0, self.global_max_speed)
+        if self.vmin >= vmax_init:
+            vmax_init = self.vmin + 0.1 * self.global_max_speed + 1e-3
+
         ax_vmin = plt.axes([0.35, 0.04, 0.22, 0.02], facecolor='whitesmoke')
         self.slider_vmin = Slider(ax_vmin, 'V min', -self.global_max_speed, self.global_max_speed, valinit=self.vmin)
         self.slider_vmin.on_changed(self.on_color_limit_change)
 
         ax_vmax = plt.axes([0.68, 0.04, 0.22, 0.02], facecolor='whitesmoke')
-        self.slider_vmax = Slider(ax_vmax, 'V max', -self.global_max_speed, self.global_max_speed, valinit=self.vmax)
+        self.slider_vmax = Slider(ax_vmax, 'V max', -self.global_max_speed, self.global_max_speed, valinit=vmax_init)
         self.slider_vmax.on_changed(self.on_color_limit_change)
 
         # Plane selection radio buttons
@@ -118,6 +135,9 @@ class SliceViewer:
     def on_color_limit_change(self, val):
         self.vmin = self.slider_vmin.val
         self.vmax = self.slider_vmax.val
+        # Ensure vmin < vmax
+        if self.vmin >= self.vmax:
+            self.vmax = self.vmin + 1e-6
         self.update(self.current_slice)
         
     def on_plane_change(self, label):
@@ -160,6 +180,10 @@ class SliceViewer:
         self.slider_vmax.valmin = -self.global_max_speed
         self.slider_vmax.valmax = self.global_max_speed
         self.slider_vmin.set_val(self.vmin)
+        
+        # Ensure vmin < vmax for safety
+        if self.vmin >= self.vmax:
+             self.vmax = self.vmin + 1e-6
         self.slider_vmax.set_val(self.vmax)
 
         # Re-calc speed for background
@@ -216,7 +240,7 @@ class SliceViewer:
             
             # Create a colored mask (grey for solid)
             overlay = np.zeros((M_slice.shape[0], M_slice.shape[1], 4))
-            overlay[~M_slice] = [0.2, 0.2, 0.2, 0.5] # Grey with alpha
+            overlay[~M_slice] = [0.0, 0.0, 0.0, 0.5] # Grey with alpha
             self.ax.imshow(overlay, extent=extent, origin='lower', zorder=2)
 
         # Plot background speed
@@ -263,17 +287,25 @@ class SliceViewer:
         self.ax.set_aspect('equal')
 
 class ComparisonViewer(SliceViewer):
-    def __init__(self, u1, v1, w1, u2, v2, w2, x, y, z, mask=None, labels=("Field 1", "Field 2")):
+    def __init__(self, u1, v1, w1, u2, v2, w2, x, y, z, mask=None, labels=("Field 1", "Field 2"), fig=None):
         # Ref
         self.u2, self.v2, self.w2 = u2, v2, w2
         self.labels = labels
         self.speed2 = np.sqrt(u2**2 + v2**2 + w2**2)
         # Base handles PTV field and UI state
-        super().__init__(u1, v1, w1, x, y, z, mask=mask)
+        super().__init__(u1, v1, w1, x, y, z, mask=mask, fig=fig)
 
     def setup_widgets(self):
-        plt.close(self.fig)
-        self.fig, self.axs = plt.subplots(1, 3, figsize=(18, 6), sharex=True, sharey=True)
+        if not self._is_custom_fig:
+            plt.close(self.fig)
+            self.fig, self.axs = plt.subplots(1, 3, figsize=(18, 6), sharex=True, sharey=True)
+        else:
+            if len(self.fig.axes) >= 3:
+                self.axs = self.fig.axes[:3]
+            else:
+                self.fig.clf()
+                self.axs = self.fig.subplots(1, 3, sharex=True, sharey=True)
+        
         plt.subplots_adjust(bottom=0.25, left=0.1, right=0.9, wspace=0.1)
         self.ax = self.axs[0] 
         self.cax1 = self.fig.add_axes([0.92, 0.3, 0.015, 0.5])
@@ -284,6 +316,10 @@ class ComparisonViewer(SliceViewer):
         for s in [self.slider, self.slider_vscale, self.slider_vmin, self.slider_vmax]:
             pos = s.ax.get_position()
             s.ax.set_position([0.33, pos.y0, 0.4, pos.height])
+            
+        # Field toggle (if dual) - move to avoid visibility overlap
+        if self.has_dual_fields:
+            self.radio_field.ax.set_position([0.05, 0.18, 0.1, 0.1])
 
     def update(self, slice_idx):
         if not hasattr(self, 'axs'): return
@@ -362,17 +398,25 @@ class ComparisonViewer(SliceViewer):
         self.fig.suptitle(f"{self.field_name} {plane} view at {self.dim_names[self.axis]}={self.coords[self.axis][slice_idx]:.2f}")
 
 class SideBySideViewer(SliceViewer):
-    def __init__(self, u1, v1, w1, u2, v2, w2, x, y, z, mask=None, labels=("Field 1", "Field 2")):
+    def __init__(self, u1, v1, w1, u2, v2, w2, x, y, z, mask=None, labels=("Field 1", "Field 2"), fig=None):
         # Ref
         self.u2, self.v2, self.w2 = u2, v2, w2
         self.labels = labels
         self.speed2 = np.sqrt(u2**2 + v2**2 + w2**2)
         # Base handles PTV field and UI state
-        super().__init__(u1, v1, w1, x, y, z, mask=mask)
+        super().__init__(u1, v1, w1, x, y, z, mask=mask, fig=fig)
 
     def setup_widgets(self):
-        plt.close(self.fig)
-        self.fig, self.axs = plt.subplots(1, 2, figsize=(16, 7), sharex=True, sharey=True)
+        if not self._is_custom_fig:
+            plt.close(self.fig)
+            self.fig, self.axs = plt.subplots(1, 2, figsize=(16, 7), sharex=True, sharey=True)
+        else:
+            if len(self.fig.axes) >= 2:
+                self.axs = self.fig.axes[:2]
+            else:
+                self.fig.clf()
+                self.axs = self.fig.subplots(1, 2, sharex=True, sharey=True)
+                
         plt.subplots_adjust(bottom=0.25, left=0.1, right=0.9, wspace=0.1)
         self.ax = self.axs[0] 
         self.cax1 = self.fig.add_axes([0.92, 0.3, 0.015, 0.5])
@@ -467,27 +511,28 @@ class SideBySideViewer(SliceViewer):
         self.fig.suptitle(f"{self.field_name} {plane} view at {self.dim_names[self.axis]}={self.coords[self.axis][slice_idx]:.2f}")
 
 class ScalarSliceViewer(SliceViewer):
-    def __init__(self, data, x, y, z, mask=None, title="Scalar Field", cmap="RdBu_r"):
+    def __init__(self, data, x, y, z, mask=None, title="Scalar Field", cmap="RdBu_r", fig=None):
         # We spoof u, v, w as zeros for the base class, or just handle it
         self.data_field = data
         self.cmap = cmap
         self.title_base = title
         # For base class to not crash
-        super().__init__(np.zeros_like(data), np.zeros_like(data), np.zeros_like(data), x, y, z, mask=mask)
+        super().__init__(np.zeros_like(data), np.zeros_like(data), np.zeros_like(data), x, y, z, mask=mask, fig=fig)
         
         # Override vmin/vmax for scalar field
         vabs = np.nanmax(np.abs(data))
         self.vmin, self.vmax = -vabs, vabs
+        if self.vmin >= self.vmax:
+            self.vmax = self.vmin + 1e-4
         self.slider_vmin.set_val(self.vmin)
         self.slider_vmax.set_val(self.vmax)
 
     def setup_widgets(self):
         super().setup_widgets()
-        # Hide things we don't need
-        self.radio_color.ax.set_visible(False)
-        self.radio_field.ax.set_visible(False)
-        self.check_vectors.ax.set_visible(False)
-        self.check_input.ax.set_visible(False)
+        # Hide things we don't need, safely
+        for attr in ['radio_color', 'radio_field', 'check']:
+            if hasattr(self, attr):
+                getattr(self, attr).ax.set_visible(False)
 
     def update(self, slice_idx):
         if not hasattr(self, 'ax'): return
@@ -529,15 +574,19 @@ class ScalarSliceViewer(SliceViewer):
         self.ax.set_aspect('equal')
 
 class ScalarSideBySideViewer(ScalarSliceViewer):
-    def __init__(self, data1, data2, x, y, z, mask=None, labels=("Field 1", "Field 2"), title="Scalar Comparison", cmap="RdBu_r"):
+    def __init__(self, data1, data2, x, y, z, mask=None, labels=("Field 1", "Field 2"), title="Scalar Comparison", cmap="RdBu_r", fig=None):
         self.data1 = data1
         self.data2 = data2
         self.labels = labels
-        super().__init__(data1, x, y, z, mask=mask, title=title, cmap=cmap)
+        self.title_base = title
+        # For base class to not crash
+        super().__init__(data1, x, y, z, mask=mask, title=title, cmap=cmap, fig=fig)
         
         # Override vmin/vmax for combined data
         vabs = max(np.nanmax(np.abs(data1)), np.nanmax(np.abs(data2)))
         self.vmin, self.vmax = -vabs, vabs
+        if self.vmin >= self.vmax:
+            self.vmax = self.vmin + 1e-4
         self.slider_vmin.set_val(self.vmin)
         self.slider_vmax.set_val(self.vmax)
 
@@ -602,22 +651,27 @@ class ScalarSideBySideViewer(ScalarSliceViewer):
         self.axs[0].set_ylabel(self.dim_names[v_ax])
         self.fig.suptitle(f"{self.title_base} {plane}: {self.dim_names[self.axis]}={self.coords[self.axis][slice_idx]:.2f}")
 
-def show(u, v, w, x, y, z, mask=None, input_df=None):
-    viewer = SliceViewer(u, v, w, x, y, z, mask, input_df)
-    plt.show()
+def show(u, v, w, x, y, z, mask=None, input_df=None, fig=None):
+    viewer = SliceViewer(u, v, w, x, y, z, mask, input_df, fig=fig)
+    if fig is None: plt.show()
+    return viewer
 
-def compare(u1, v1, w1, u2, v2, w2, x, y, z, mask=None, labels=("Field 1", "Field 2")):
-    viewer = ComparisonViewer(u1, v1, w1, u2, v2, w2, x, y, z, mask, labels)
-    plt.show()
+def compare(u1, v1, w1, u2, v2, w2, x, y, z, mask=None, labels=("Field 1", "Field 2"), fig=None):
+    viewer = ComparisonViewer(u1, v1, w1, u2, v2, w2, x, y, z, mask, labels, fig=fig)
+    if fig is None: plt.show()
+    return viewer
 
-def side_by_side(u1, v1, w1, u2, v2, w2, x, y, z, mask=None, labels=("Field 1", "Field 2")):
-    viewer = SideBySideViewer(u1, v1, w1, u2, v2, w2, x, y, z, mask, labels)
-    plt.show()
+def side_by_side(u1, v1, w1, u2, v2, w2, x, y, z, mask=None, labels=("Field 1", "Field 2"), fig=None):
+    viewer = SideBySideViewer(u1, v1, w1, u2, v2, w2, x, y, z, mask, labels, fig=fig)
+    if fig is None: plt.show()
+    return viewer
 
-def show_scalar(data, x, y, z, mask=None, title="Scalar Field", cmap="RdBu_r"):
-    viewer = ScalarSliceViewer(data, x, y, z, mask, title, cmap)
-    plt.show()
+def show_scalar(data, x, y, z, mask=None, title="Scalar Field", cmap="RdBu_r", fig=None):
+    viewer = ScalarSliceViewer(data, x, y, z, mask, title, cmap, fig=fig)
+    if fig is None: plt.show()
+    return viewer
 
-def compare_scalars(data1, data2, x, y, z, mask=None, labels=("Field 1", "Field 2"), title="Scalar Comparison", cmap="RdBu_r"):
-    viewer = ScalarSideBySideViewer(data1, data2, x, y, z, mask, labels, title, cmap)
-    plt.show()
+def compare_scalars(data1, data2, x, y, z, mask=None, labels=("Field 1", "Field 2"), title="Scalar Comparison", cmap="RdBu_r", fig=None):
+    viewer = ScalarSideBySideViewer(data1, data2, x, y, z, mask, labels, title, cmap, fig=fig)
+    if fig is None: plt.show()
+    return viewer

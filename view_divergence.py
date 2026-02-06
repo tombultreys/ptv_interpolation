@@ -7,6 +7,7 @@ from physics import compute_consistent_divergence
 def main():
     parser = argparse.ArgumentParser(description="Visualize flow field divergence before and after cleaning.")
     parser.add_argument("file", nargs="?", default="sinteredGlass_interpolated.npz", help="Path to the .npz result file.")
+    parser.add_argument("--velocity", "-v", action="store_true", help="Visualize velocity field comparison instead of divergence.")
     args = parser.parse_args()
 
     print(f"Loading data from {args.file}...")
@@ -49,10 +50,18 @@ def main():
     print(f"  Cleaned: {m_clean:.6e}")
     print(f"  Reduction: {m_init/m_clean:.2f}x")
 
-    print("\nLaunching Side-by-Side Divergence Viewer...")
-    compare_scalars(div_init, div_clean, x, y, z, mask=mask, 
-                    labels=("Initial Divergence", "Cleaned Divergence"),
-                    title="Flow Field Divergence Comparison")
+    if args.velocity:
+        from visualizer import show
+        print("\nLaunching Velocity Field Viewer (with Cleaned/Original toggle)...")
+        u_data = (u_clean, u_init)
+        v_data = (v_clean, v_init)
+        w_data = (w_clean, w_init)
+        show(u_data, v_data, w_data, x, y, z, mask=mask)
+    else:
+        print("\nLaunching Side-by-Side Divergence Viewer...")
+        compare_scalars(div_init, div_clean, x, y, z, mask=mask, 
+                        labels=("Initial Divergence", "Cleaned Divergence"),
+                        title="Flow Field Divergence Comparison")
 
 if __name__ == "__main__":
     main()

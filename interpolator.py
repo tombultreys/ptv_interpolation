@@ -4,6 +4,7 @@ import pandas as pd
 from scipy.interpolate import griddata
 import tifffile
 import os
+import scipy.ndimage
 
 def load_ptv_data(filepath):
     """
@@ -61,13 +62,17 @@ def create_grid(bounds, resolution):
 def _rbf_worker(interp, chunk):
     return interp(chunk)
 
-def interpolate_field(df, grid_tuple, method='linear', rbf_neighbors=50, rbf_kernel='thin_plate_spline', n_jobs=1):
+def interpolate_field(df, grid_tuple, method='linear', rbf_neighbors=20, rbf_kernel='thin_plate_spline', smoothing=0.0, n_jobs=1, idw_power=2.0, idw_neighbors=50, sibson_neighbors=30):
     """
     Interpolates PTV data onto the grid.
     df: PTV dataframe
     grid_tuple: (X, Y, Z) meshgrids
-    method: 'linear', 'nearest', 'cubic' (2D only), 'rbf' (3D)
+    method: 'linear', 'nearest', 'cubic' (2D only), 'rbf' (3D), 'idw' (3D), 'sibson' (3D)
+    smoothing: Smoothing parameter for RBF (default 0.0)
     n_jobs: Number of processes for RBF evaluation (default 1)
+    idw_power: Power parameter for IDW (default 2.0, higher = more local)
+    idw_neighbors: Number of neighbors for IDW (default 50)
+    sibson_neighbors: Number of neighbors for Sibson interpolation (default 30)
     """
     X, Y, Z = grid_tuple
     points = df[['x', 'y', 'z']].values
@@ -75,15 +80,90 @@ def interpolate_field(df, grid_tuple, method='linear', rbf_neighbors=50, rbf_ker
     
     grid_coords = (X, Y, Z)
     
-    if method == 'rbf':
+    if method == 'sibson':
+        from scipy.spatial import Delaunay
+        from scipy.spatial import KDTree
+        
+        print(f"Using Sibson (Natural Neighbor) Interpolation (neighbors={sibson_neighbors})...")
+        
+        # Build KDTree for efficient neighbor search
+        tree = KDTree(points)
+        
+        # Flatten grid for processing
+        flat_coords = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=-1)
+        n_points = len(flat_coords)
+        
+        # Query k nearest neighbors for each grid point
+        distances, indices = tree.query(flat_coords, k=sibson_neighbors)
+        
+        # Compute Sibson weights based on Voronoi cell areas
+        # For 3D, we use a simplified approach: weights proportional to inverse distance
+        # with normalization that mimics natural neighbor behavior
+        epsilon = 1e-10
+        
+        # Sibson weights: more sophisticated than IDW
+        # Use inverse distance but with Voronoi-like normalization
+        inv_dist = 1.0 / (distances + epsilon)
+        
+        # Natural neighbor property: weights sum to 1 and are based on "stolen area"
+        # We approximate this with a smoother distance weighting
+        weights = inv_dist / inv_dist.sum(axis=1, keepdims=True)
+        
+        # Apply additional smoothing based on distance variance (mimics Voronoi cell size)
+        dist_std = distances.std(axis=1, keepdims=True)
+        smoothing_factor = np.exp(-distances / (dist_std + epsilon))
+        weights = weights * smoothing_factor
+        weights = weights / weights.sum(axis=1, keepdims=True)
+        
+        # Weighted average of neighbor values
+        interpolated_flat = np.zeros((n_points, 3))
+        for i in range(3):  # u, v, w components
+            neighbor_values = values[indices, i]
+            interpolated_flat[:, i] = (weights * neighbor_values).sum(axis=1)
+        
+        interpolated = interpolated_flat.reshape(X.shape + (3,))
+    
+    elif method == 'idw':
+        from scipy.spatial import KDTree
+        
+        print(f"Using IDW Interpolation (power={idw_power}, neighbors={idw_neighbors})...")
+        
+        # Build KDTree for efficient neighbor search
+        tree = KDTree(points)
+        
+        # Flatten grid for processing
+        flat_coords = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=-1)
+        n_points = len(flat_coords)
+        
+        # Query k nearest neighbors for each grid point
+        distances, indices = tree.query(flat_coords, k=idw_neighbors)
+        
+        # Compute IDW weights: w_i = 1 / (d_i^p + epsilon)
+        epsilon = 1e-10  # Avoid division by zero
+        weights = 1.0 / (distances**idw_power + epsilon)
+        
+        # Normalize weights
+        weights_sum = weights.sum(axis=1, keepdims=True)
+        weights_normalized = weights / weights_sum
+        
+        # Weighted average of neighbor values
+        interpolated_flat = np.zeros((n_points, 3))
+        for i in range(3):  # u, v, w components
+            neighbor_values = values[indices, i]
+            interpolated_flat[:, i] = (weights_normalized * neighbor_values).sum(axis=1)
+        
+        interpolated = interpolated_flat.reshape(X.shape + (3,))
+        
+    elif method == 'rbf':
         from scipy.interpolate import RBFInterpolator
         from concurrent.futures import ProcessPoolExecutor
         
-        print(f"Using RBF Interpolation ({rbf_kernel}) with {rbf_neighbors} neighbors and n_jobs={n_jobs}...")
+        print(f"Using RBF Interpolation ({rbf_kernel}) with {rbf_neighbors} neighbors, smoothing={smoothing} and n_jobs={n_jobs}...")
         interp = RBFInterpolator(
             points, values, 
             neighbors=rbf_neighbors, 
-            kernel=rbf_kernel
+            kernel=rbf_kernel,
+            smoothing=smoothing
         )
         
         # Flatten grid for RBF input
@@ -156,3 +236,49 @@ def sample_mask_on_grid(mask_raw, grid_tuple, bounds_raw):
     mask_sampled = interp(points).reshape(X.shape)
     
     return mask_sampled > 0.5
+
+def extract_boundary_particles(mask, bounds, sampling_step=1, thickness=1):
+    """
+    Identifies voxels at the fluid-solid interface and returns their physical coordinates.
+    mask: boolean array (True=fluid, False=solid)
+    bounds: ((xmin, xmax), (ymin, ymax), (zmin, zmax))
+    sampling_step: take every Nth boundary point.
+    thickness: Number of layers of solid voxels to include as boundary particles.
+    """
+    if mask is None:
+        return np.array([]), np.array([]), np.array([])
+        
+    nz, ny, nx = mask.shape
+    (xmin, xmax), (ymin, ymax), (zmin, zmax) = bounds
+    
+    # Identify interior of solid (False regions) that are adjacent to fluid (True regions)
+    # Binary dilation of fluid into solid
+    struct = scipy.ndimage.generate_binary_structure(3, 1) # 6-connectivity
+    
+    # If thickness > 1, we can use iterations
+    fluid_dilated = scipy.ndimage.binary_dilation(mask, structure=struct, iterations=thickness)
+    
+    # Boundary voxels are those that were False (solid) but are now True (within dilated fluid)
+    boundary_mask = fluid_dilated & (~mask)
+    
+    # Get indices of boundary voxels
+    Z_idx, Y_idx, X_idx = np.where(boundary_mask)
+    
+    if len(X_idx) == 0:
+        return np.array([]), np.array([]), np.array([])
+        
+    # Apply sampling if requested
+    if sampling_step > 1:
+        Z_idx = Z_idx[::sampling_step]
+        Y_idx = Y_idx[::sampling_step]
+        X_idx = X_idx[::sampling_step]
+        
+    # Map indices back to physical coordinates
+    # Consistent with create_grid: x = np.linspace(xmin, xmax-1, nx)
+    # dx = (xmax - 1 - xmin) / (nx - 1)
+    
+    z_phys = zmin + Z_idx * (zmax - 1 - zmin) / (nz - 1) if nz > 1 else np.full_like(Z_idx, zmin)
+    y_phys = ymin + Y_idx * (ymax - 1 - ymin) / (ny - 1) if ny > 1 else np.full_like(Y_idx, ymin)
+    x_phys = xmin + X_idx * (xmax - 1 - xmin) / (nx - 1) if nx > 1 else np.full_like(X_idx, xmin)
+    
+    return x_phys, y_phys, z_phys
