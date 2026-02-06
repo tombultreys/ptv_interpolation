@@ -8,12 +8,12 @@ INPUT_CSV = r"/media/tbultrey/data/PIV_20210622/XPTV_porousGlass/4_trackingOutpu
 INPUT_MASK = r"/media/tbultrey/data/PIV_20210622/XPTV_porousGlass/2_segmentedImage/000_6_HQ_sample2_poreMask_binary.tif"
 
 # Output filenames
-OUTPUT_TIF = "sinteredGlass_interpolatedFullRes_sibson20_var.tif"
-OUTPUT_NPZ = "sinteredGlass_interpolatedFullRes_sibson20_var.npz"
+OUTPUT_TIF = "sinteredGlass_interpolated_sibson200_var.tif"
+OUTPUT_NPZ = "sinteredGlass_interpolated_sibson200_var.npz"
 CROP_COORDS = ["175", "497", "160", "497", "60", "546"] # cropping box [x1, x2, y1, y2, z1, z2]
 OFFSET = ["175", "160", "60"] # offset to align velocity data with cropped box
 METHOD = "sibson" # linear, rbf or sibson
-DOWNSCALE = "1" # 1 for original resolution, 2 for half resolution, etc
+DOWNSCALE = "2" # 1 for original resolution, 2 for half resolution, etc
 
 def run():
     print("--- Setting up PTV Interpolation for Porous Glass Data ---")
@@ -59,7 +59,7 @@ def run():
         "--idw-neighbors", "40",
 
         ### Parameters for Sibson interpolation
-        "--sibson-neighbors", "20",
+        "--sibson-neighbors", "50",
 
         # Parameters for divergence cleaning
         "--divergence-free",
